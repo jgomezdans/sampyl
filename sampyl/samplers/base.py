@@ -1,16 +1,19 @@
-from ..core import np, auto_grad_logp
-from ..state import State, func_var_names
 from itertools import count
-from ..progressbar import update_progress
 import time
+
+from ..core import np, auto_grad_logp
+from ..parallel import parallel
+from ..progressbar import update_progress
+from ..state import State, func_var_names
 
 
 class Sampler(object):
     def __init__(self, logp, start,
-                 grad_logp      = None,
-                 scale          = None,
-                 condition      = None,
-                 grad_logp_flag = True):
+                 grad_logp=None,
+                 scale=None,
+                 condition=None,
+                 grad_logp_flag=True,
+                 random_seed=None):
         self.logp = check_logp(logp)
         self.var_names = func_var_names(logp)
         self.state = State.fromfunc(logp)
@@ -22,6 +25,7 @@ class Sampler(object):
         self._accepted = 0
         self.conditional = condition
         self._grad_logp_flag = grad_logp_flag
+        self.seed = random_seed
 
         if self._grad_logp_flag and grad_logp is None:
             self.grad_logp = auto_grad_logp(logp)
@@ -72,7 +76,7 @@ class Sampler(object):
         """ This is what you define to create the sampler. """
         pass
 
-    def sample(self, num, burn=-1, thin=1, progress_bar=True):
+    def sample(self, num, burn=-1, thin=1, n_chains=1, progress_bar=True):
         """ Sample from distribution defined by logp.
 
             Parameters
@@ -84,14 +88,30 @@ class Sampler(object):
                 Number of samples to burn through
             thin: thin
                 Thin the samples by this factor
+            n_chains: int
+                Number of chains to return. Each chain is given its own
+                process and the OS decides how to distribute the processes.
             progress_bar: boolean
                 Show the progress bar, default = True
         """
+        if self.seed is not None:
+            np.random.seed(self.seed)
+
+        if self._grad_logp_flag and self.grad_logp is None:
+            self.grad_logp = auto_grad_logp(self.logp)
+
+        # Constructing a recarray to store samples
+        dtypes = [(var, 'f8', np.shape(self.state[var])) for var in self.state]
+        samples = np.zeros(num, dtype=dtypes).view(np.recarray)
+
+        if n_chains != 1:
+            return parallel(self, n_chains, samples,
+                            burn=burn, thin=thin,
+                            progress_bar=progress_bar)
+
         if self.sampler is None:
             self.sampler = (self.step() for _ in count(start=0, step=1))
 
-        dtypes = [(var, 'f8', np.shape(self.state[var])) for var in self.state]
-        samples = np.zeros(num, dtype=dtypes).view(np.recarray)
         start_time = time.time()
         for i in range(num):
             samples[i] = next(self.sampler).tovector()
